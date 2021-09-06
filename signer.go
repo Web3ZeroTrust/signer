@@ -21,5 +21,6 @@ type EthersSigner interface {
 	SignTransaction(ctx context.Context, client *TrustClient, tx *ethersigner.Transaction) error
 }
 
-type KeyStore interface {
+type CryptoProvider interface {
+	OpenSession(ctx context.Context) error
 }
