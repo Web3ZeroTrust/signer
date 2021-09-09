@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/elliptic"
-	"encoding/hex"
 	"math/big"
 
 	"github.com/libs4go/crypto/bip32"
@@ -14,7 +13,6 @@ import (
 	"github.com/libs4go/encoding/web3"
 	"github.com/libs4go/errors"
 	"github.com/libs4go/scf4go"
-	"github.com/libs4go/smf4go"
 	"github.com/web3zerotrust/signer"
 	"github.com/web3zerotrust/signer/did"
 )
@@ -32,8 +30,8 @@ var didKeyPath = "m/44'/608581'/0'/0/0"
 var didVendor = "trust-signer"
 var didVersion = byte(20)
 
-var sessionVendor = "trust-signer-session"
-var sessionVersion = byte(20)
+var keyVendor = "trust-signer-key"
+var keyVersion = byte(20)
 
 var idKey = "__crypto_provider_id"
 
@@ -44,7 +42,7 @@ type providerImpl struct {
 }
 
 // New create new signer crypto provider
-func New(config scf4go.Config) (smf4go.Service, error) {
+func New(config scf4go.Config) (signer.CryptoProvider, error) {
 	return &providerImpl{}, nil
 }
 
@@ -95,7 +93,7 @@ func (impl *providerImpl) ID(ctx context.Context) (string, error) {
 }
 
 func (impl *providerImpl) CreateHDWallet(ctx context.Context, adminPassword string) (string, error) {
-	entropy, err := bip39.NewEntropy(21 * 8)
+	entropy, err := bip39.NewEntropy(24 * 8)
 
 	if err != nil {
 		return "", errors.Wrap(err, "Create Entropy(%d) error", 21)
@@ -132,13 +130,13 @@ func (impl *providerImpl) CreateHDWallet(ctx context.Context, adminPassword stri
 		return "", err
 	}
 
-	err = impl.KeyStore.Put(ctx, []byte(mnemonicKey), buff.Bytes(), true)
+	err = impl.KeyStore.Put(ctx, []byte(mnemonicKey), buff.Bytes(), signer.KeyStoreForce())
 
 	if err != nil {
 		return "", err
 	}
 
-	err = impl.KeyStore.Put(ctx, []byte(idKey), []byte(id), true)
+	err = impl.KeyStore.Put(ctx, []byte(idKey), []byte(id), signer.KeyStoreForce())
 
 	if err != nil {
 		impl.forceDeleteHDWallet(ctx)
@@ -160,7 +158,7 @@ func (impl *providerImpl) saveWithPassword(ctx context.Context, key []byte, data
 		return err
 	}
 
-	err = impl.KeyStore.Put(ctx, []byte(mnemonicKey), buff.Bytes(), true)
+	err = impl.KeyStore.Put(ctx, key, buff.Bytes(), signer.KeyStoreForce())
 
 	if err != nil {
 		return err
@@ -170,7 +168,7 @@ func (impl *providerImpl) saveWithPassword(ctx context.Context, key []byte, data
 }
 
 func (impl *providerImpl) getWithPassword(ctx context.Context, key []byte, password string) ([]byte, error) {
-	data, err := impl.KeyStore.Get(ctx, []byte(mnemonicKey))
+	data, err := impl.KeyStore.Get(ctx, key)
 
 	if err != nil {
 		return nil, err
@@ -202,30 +200,37 @@ func (impl *providerImpl) DeleteHDWallet(ctx context.Context, adminPassword stri
 	return impl.forceDeleteHDWallet(ctx)
 }
 
-func (impl *providerImpl) OpenSession(ctx context.Context, adminPassword string, sessionPassword string, bip44Path string) (string, error) {
+func (impl *providerImpl) OpenKey(ctx context.Context, adminPassword string, sessionPassword string, bip44Path string, curves []elliptic.Curve) (string, [][]byte, error) {
 	drivedKey, err := impl.drivedKey(ctx, adminPassword, bip44Path)
 
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
-	id := did.PubKey2ID(drivedKey.PublicKey, sessionVendor, sessionVersion)
+	keyID := did.PubKey2ID(drivedKey.PublicKey, keyVendor, keyVersion)
 
-	err = impl.saveWithPassword(ctx, []byte(id), drivedKey.PrivateKey, sessionPassword)
+	err = impl.saveWithPassword(ctx, []byte(keyID), drivedKey.PrivateKey, sessionPassword)
 
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
-	return hex.EncodeToString(drivedKey.PublicKey), nil
+	var pubKeys [][]byte
+
+	for _, curve := range curves {
+		privateKey := ecdsax.BytesToPrivateKey(drivedKey.PrivateKey, curve)
+		pubKeys = append(pubKeys, ecdsax.PublicKeyBytes(&privateKey.PublicKey))
+	}
+
+	return keyID, pubKeys, nil
 }
 
-func (impl *providerImpl) Sign(ctx context.Context, session string, password string, curve elliptic.Curve, hash []byte, compressed bool) (*big.Int, *big.Int, *big.Int, error) {
+func (impl *providerImpl) Sign(ctx context.Context, keyID string, password string, curve elliptic.Curve, hash []byte, compressed bool) (*big.Int, *big.Int, *big.Int, error) {
 
-	buff, err := impl.getWithPassword(ctx, []byte(session), password)
+	buff, err := impl.getWithPassword(ctx, []byte(keyID), password)
 
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, errors.Wrap(err, "key(%s) not found", keyID)
 	}
 
 	privateKey := ecdsax.BytesToPrivateKey(buff, curve)
@@ -233,6 +238,24 @@ func (impl *providerImpl) Sign(ctx context.Context, session string, password str
 	return ecdsax.RecoverSign(privateKey, hash, compressed)
 }
 
-func (impl *providerImpl) CloseSession(ctx context.Context, session string) error {
-	return impl.KeyStore.Delete(ctx, []byte(session))
+func (impl *providerImpl) CloseKey(ctx context.Context, keyID string) error {
+	return impl.KeyStore.Delete(ctx, []byte(keyID))
+}
+
+func (impl *providerImpl) KeyPublicKey(ctx context.Context, keyID string, password string, curves []elliptic.Curve) ([][]byte, error) {
+	buff, err := impl.getWithPassword(ctx, []byte(keyID), password)
+
+	if err != nil {
+		return nil, errors.Wrap(err, "key(%s) not found", keyID)
+	}
+
+	var pubKeys [][]byte
+
+	for _, curve := range curves {
+		privateKey := ecdsax.BytesToPrivateKey(buff, curve)
+		pubKeys = append(pubKeys, ecdsax.PublicKeyBytes(&privateKey.PublicKey))
+	}
+
+	return pubKeys, nil
+
 }
