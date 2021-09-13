@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/libs4go/errors"
-	"github.com/libs4go/ethers/signer"
 )
 
 // ScopeOfAPIError .
@@ -18,98 +17,76 @@ var (
 	ErrNotFound = errors.New("Resource not found", errors.WithVendor(errVendor), errors.WithCode(-1))
 )
 
-type EthersSigner interface {
-	// Ether wallet receive address
-	Addresss(ctx context.Context, userID string) string
-	// SignTypedData implement eip712 sign ...
-	SignTypedData(ctx context.Context, userID string, typedData *signer.TypedData) ([]byte, error)
-	// SignTransaction sign ether transaction
-	SignTransaction(ctx context.Context, userID string, tx *signer.Transaction) error
-}
-
-// TenancyWallet hold signer generate wallet inforamtion
-type TenancyWallet struct {
-	KeyID     string            // wallet binding crypto provider key
-	BIP44Path string            // wallet bip44 path
-	Addresses map[string]string // wallet addresses
-}
-
-type Tenancy struct {
-	ID           string          // user id
-	WalletHot    *TenancyWallet  // hot user wallets
-	WalletBackup *TenancyWallet  // backup wallet
-	WalletCold   WalletAddresses //  cold wallet addresses
-	CreatedTime  time.Time       // tenancy created time
-	UpdatedTime  time.Time       // tenancy last update time
-}
-
-type WalletAddresses map[string]string
-
-type MultiTenancyProvider interface {
-	// create new user, and Generate wallets
-	New(ctx context.Context, walletCold WalletAddresses, adminPassword string) (userID string, err error)
-	// remove user
-	Delete(ctx context.Context, userID string) error
-	// Get wallet data
-	User(ctx context.Context, userID string) (*Tenancy, error)
-	// Regenerate signer manager wallet keys
-	RefreshWallet(ctx context.Context, userID string, adminPassword string) (*Tenancy, error)
-	// Update cold wallet
-	UpdateColdWallet(ctx context.Context, userID string, walletCold WalletAddresses) error
-}
-
-type MultiTenancyStorage interface {
-	New(ctx context.Context, tenancy *Tenancy) error
-	Delete(ctx context.Context, id string) error
-	Get(ctx context.Context, id string) (*Tenancy, error)
-	Update(ctx context.Context, id string, txF func(ctx context.Context, tenancy *Tenancy, updateF func(tenancy *Tenancy) error) error) error
-}
-
-type WalletProvider interface {
-	NewBIP44Wallet(ctx context.Context, id string, internal bool, adminPassword string) (path string, password string, err error)
-	Password(ctx context.Context, id string, bip44path string)
-}
-
+// CryptoProvider crypto provider service
 type CryptoProvider interface {
-	// if return empty string "", call CreateHDWallet to initialize crypto provider
-	ID(ctx context.Context) (string, error)
-	// Create HDWallet and return wallet id
-	CreateHDWallet(ctx context.Context, adminPassword string) (id string, err error)
-	// Delete HDWallet by id
-	DeleteHDWallet(ctx context.Context, adminPassword string) error
-	// Create or return exists drived wallet publickey and save private key protected by password to keystore
-	OpenKey(ctx context.Context, adminPassword string, sessionPassword string, bip44Path string, curves []elliptic.Curve) (string, [][]byte, error)
-	// Sign data with bip44 drived wallet
-	Sign(ctx context.Context, keyID string, password string, curve elliptic.Curve, hash []byte, compressed bool) (*big.Int, *big.Int, *big.Int, error)
-	// Remove private key from keystore
+	// Export mnemonic
+	Export(ctx context.Context, password string, tenancyID string) (mnemonic string, err error)
+	// Import tenancy with mnemonic
+	Import(ctx context.Context, password string, mnemonic string) (tenancyID string, err error)
+	// Open and create new crypto provider and keystore
+	Open(ctx context.Context, password string) (tenancyID string, err error)
+	// Close close crypto provider and rm keystore
+	Close(ctx context.Context, tenancyID string) error
+	// OpenKey open new key
+	OpenKey(ctx context.Context, password string, tenancyID string, bip44Path string) (keyID string, err error)
+	// Sign call key sign
+	Sign(ctx context.Context, password string, keyID string, curve elliptic.Curve, hashed []byte) (r *big.Int, s *big.Int, v *big.Int, err error)
+	// CloseKey close key
 	CloseKey(ctx context.Context, keyID string) error
-	// Get Key public key
-	KeyPublicKey(ctx context.Context, keyID string, password string, curves []elliptic.Curve) ([][]byte, error)
+	// Generate public keys
+	PublicKeys(ctx context.Context, password string, keyID string, curves []elliptic.Curve) (pubkeys [][]byte, err error)
 }
 
-// KeyStore ....
-
-type KeyStoreOps struct {
-	Force   bool
+// StorageOps storage operator options
+type StorageOps struct {
 	Encrypt bool
 }
 
-type KeyStoreOp func(ops *KeyStoreOps)
+// Storage op function
+type StorageOp func(ops *StorageOps)
 
-func KeyStoreForce() KeyStoreOp {
-	return func(ops *KeyStoreOps) {
-		ops.Force = true
-	}
-}
-
-func KeyStoreEncrypt() KeyStoreOp {
-	return func(ops *KeyStoreOps) {
-		ops.Encrypt = true
-	}
-}
-
+// KeyStore service
 type KeyStore interface {
-	Put(ctx context.Context, key []byte, value []byte, ops ...KeyStoreOp) (err error)
-	Get(ctx context.Context, key []byte, ops ...KeyStoreOp) ([]byte, error)
-	Delete(ctx context.Context, key []byte, ops ...KeyStoreOp) error
+	Put(ctx context.Context, key []byte, value []byte, ops ...StorageOp) error
+	Get(ctx context.Context, key []byte, ops ...StorageOp) (value []byte, err error)
+	Delete(ctx context.Context, key []byte, ops ...StorageOp) (err error)
+}
+
+type Wallet struct {
+	ID        string            `json:"id"`
+	TenancyID string            `json:"tenancy" xorm:"unique 'tenancy_bip44_path'"`
+	BIP44Path string            `json:"bip44path" xorm:"unique 'tenancy_bip44_path'"`
+	Addresses map[string]string `json:"address"`
+	Created   time.Time         `json:"created" xorm:"created"`
+}
+
+type Tenancy struct {
+	ID      string    `json:"id"`
+	Wallets uint      `json:"wallets"`
+	Created time.Time `json:"created" xorm:"created"`
+	Updated time.Time `json:"updated" xorm:"updated"`
+}
+
+type MultiTenancy interface {
+	ExportTenancy(ctx context.Context, password string, tenancyID string) (data []byte, err error)
+	ImportTenancy(ctx context.Context, password string, data []byte) (tenancyID string, err error)
+	NewTenancy(ctx context.Context, password string) (tenancyID string, err error)
+	TenancyCount(ctx context.Context) (count uint, err error)
+	Tenancies(ctx context.Context, offset uint, count uint) (tenancies []*Tenancy, err error)
+	WalletCount(ctx context.Context, tenancyID string) (count uint, err error)
+	Wallets(ctx context.Context, tenancyID string, offset uint, count uint) (wallets []*Wallet, err error)
+	OpenWallet(ctx context.Context, password string, tenancyID string, bip44Path string) (wallet *Wallet, err error)
+	Sign(ctx context.Context, password string, walletID string, curve elliptic.Curve, hashed []byte) (r *big.Int, s *big.Int, v *big.Int, err error)
+	CloseWallet(ctx context.Context, walletID string) error
+}
+
+type TenancyStorage interface {
+	SaveTenancy(ctx context.Context, wallet *Wallet) error
+	DeleteTenancy(ctx context.Context, walletID string) error
+	TenancyCount(ctx context.Context) (count uint, err error)
+	Tenancies(ctx context.Context, offset uint, count uint) (tenancies []*Tenancy, err error)
+	SaveWallet(ctx context.Context, wallet *Wallet) error
+	DeleteWallet(ctx context.Context, walletID string) error
+	WalletCount(ctx context.Context, tenancyID string) (count uint, err error)
+	Wallets(ctx context.Context, tenancyID string, offset uint, count uint) (wallets []*Wallet, err error)
 }
